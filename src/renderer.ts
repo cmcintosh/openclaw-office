@@ -1,4 +1,5 @@
 // Canvas 2D renderer: owns canvas lifecycle, input handling, and render pipeline orchestration.
+// Browser version with pan/zoom camera controls.
 
 import { getSheet } from "./sprite-sheet";
 import type { Character } from "./character";
@@ -43,61 +44,315 @@ let screenAnimTimer = 0;
 let sweatAnimFrame = 0;
 let sweatAnimTimer = 0;
 
-const VIRTUAL_WIDTH = WORLD_WIDTH;
-const VIRTUAL_HEIGHT = WORLD_HEIGHT;
+const VIRTUAL_WIDTH = WORLD_WIDTH;   // 240
+const VIRTUAL_HEIGHT = WORLD_HEIGHT; // 560
 const TOP_GRASS_CROP_PX = 0;
+
+// === Camera state ===
+let camX = 0;        // pan offset in world pixels
+let camY = 0;        // pan offset in world pixels
+let camZoom = 1;     // zoom factor
+let minZoom = 0.5;
+let maxZoom = 4;
+let isDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragStartCamX = 0;
+let dragStartCamY = 0;
+let dragMoved = false;
+let pinchDist = 0;
+let pinchStartZoom = 1;
+
+// HUD element
+let hudEl: HTMLDivElement | null = null;
 
 export function initRenderer(canvasEl: HTMLCanvasElement): void {
   canvas = canvasEl;
-  canvas.width = VIRTUAL_WIDTH;
-  canvas.height = VIRTUAL_HEIGHT;
   ctx = canvas.getContext("2d")!;
   ctx.imageSmoothingEnabled = false;
 
-  resizeCanvasForViewport();
   canvas.style.imageRendering = "pixelated";
   canvas.style.imageRendering = "crisp-edges";
   canvas.style.touchAction = "none";
   canvas.style.display = "block";
+  canvas.style.cursor = "grab";
 
-  const handleResize = () => resizeCanvasForViewport();
+  // Create HUD for controls
+  hudEl = document.createElement("div");
+  hudEl.id = "office-hud";
+  hudEl.innerHTML = `
+    <div class="hud-btn" id="hud-zoom-in" title="Zoom In">+</div>
+    <div class="hud-btn" id="hud-zoom-out" title="Zoom Out">−</div>
+    <div class="hud-btn" id="hud-fit" title="Fit to Screen">⛶</div>
+    <div class="hud-btn" id="hud-reset" title="Reset View">⟲</div>
+  `;
+  Object.assign(hudEl.style, {
+    position: "fixed" as const,
+    bottom: "16px",
+    left: "16px",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "4px",
+    zIndex: "100",
+    pointerEvents: "none" as const,
+  });
+  document.body.appendChild(hudEl);
+
+  // Style the buttons
+  for (const btn of hudEl.querySelectorAll(".hud-btn")) {
+    Object.assign((btn as HTMLElement).style, {
+      width: "36px",
+      height: "36px",
+      background: "rgba(0,0,0,0.6)",
+      color: "#0f0",
+      border: "1px solid #030",
+      borderRadius: "6px",
+      fontSize: "18px",
+      fontWeight: "bold" as const,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      pointerEvents: "auto" as const,
+      userSelect: "none" as const,
+      fontFamily: "monospace",
+      transition: "background 0.15s",
+    });
+    (btn as HTMLElement).onmouseenter = () => {
+      (btn as HTMLElement).style.background = "rgba(0,40,0,0.8)";
+    };
+    (btn as HTMLElement).onmouseleave = () => {
+      (btn as HTMLElement).style.background = "rgba(0,0,0,0.6)";
+    };
+  }
+
+  document.getElementById("hud-zoom-in")?.addEventListener("click", () => zoomBy(1.3));
+  document.getElementById("hud-zoom-out")?.addEventListener("click", () => zoomBy(1 / 1.3));
+  document.getElementById("hud-fit")?.addEventListener("click", fitToScreen);
+  document.getElementById("hud-reset")?.addEventListener("click", resetView);
+
+  resizeCanvasForViewport();
+  fitToScreen();
+
+  const handleResize = () => {
+    resizeCanvasForViewport();
+    clampCamera();
+  };
   window.addEventListener("resize", handleResize);
   const visualViewport = window.visualViewport;
   visualViewport?.addEventListener("resize", handleResize);
 
+  // === Mouse input ===
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (e.pointerType === "touch" && e.isPrimary === false) return; // handled by pinch
+
+    isDragging = true;
+    dragMoved = false;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragStartCamX = camX;
+    dragStartCamY = camY;
+    canvas.style.cursor = "grabbing";
+
     const p = toCanvasPoint(e.clientX, e.clientY);
     handleMenuTouchStart(p.x, p.y);
   });
+
   canvas.addEventListener("pointermove", (e) => {
-    e.preventDefault();
+    if (isDragging) {
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) dragMoved = true;
+
+      if (dragMoved) {
+        const scale = getDisplayScale();
+        camX = dragStartCamX - dx / scale;
+        camY = dragStartCamY - dy / scale;
+        clampCamera();
+      }
+    }
+
     const p = toCanvasPoint(e.clientX, e.clientY);
     handleMenuTouchMove(p.x, p.y);
   });
+
   canvas.addEventListener("pointerup", (e) => {
     e.preventDefault();
+    isDragging = false;
+    canvas.style.cursor = "grab";
     handleMenuTouchEnd();
-    handleTap(e.clientX, e.clientY);
+
+    if (!dragMoved) {
+      handleTap(e.clientX, e.clientY);
+    }
   });
-  canvas.addEventListener("pointercancel", () => handleMenuTouchEnd());
+
+  canvas.addEventListener("pointercancel", () => {
+    isDragging = false;
+    canvas.style.cursor = "grab";
+    handleMenuTouchEnd();
+  });
+
+  // === Wheel zoom ===
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomAt(e.clientX, e.clientY, factor);
+  }, { passive: false });
+
+  // === Touch pinch zoom ===
+  let touches: Map<number, { x: number; y: number }> = new Map();
+  canvas.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      pinchStartZoom = camZoom;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", (e) => {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      if (pinchDist > 0) {
+        const factor = dist / pinchDist;
+        const cx = (t1.clientX + t2.clientX) / 2;
+        const cy = (t1.clientY + t2.clientY) / 2;
+        camZoom = Math.max(minZoom, Math.min(maxZoom, pinchStartZoom * factor));
+        clampCamera();
+      }
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchend", (e) => {
+    if (e.touches.length < 2) {
+      pinchDist = 0;
+    }
+  });
+
+  // === Keyboard controls ===
+  document.addEventListener("keydown", (e) => {
+    if (isMenuOpen()) return; // don't pan when menu is open
+    const panSpeed = 20 / camZoom;
+    switch (e.key) {
+      case "ArrowLeft":  camX -= panSpeed; clampCamera(); break;
+      case "ArrowRight": camX += panSpeed; clampCamera(); break;
+      case "ArrowUp":    camY -= panSpeed; clampCamera(); break;
+      case "ArrowDown":  camY += panSpeed; clampCamera(); break;
+      case "+": case "=": zoomBy(1.3); break;
+      case "-": case "_": zoomBy(1 / 1.3); break;
+      case "0": fitToScreen(); break;
+      case "r": case "R": resetView(); break;
+    }
+  });
+}
+
+function getDisplayScale(): number {
+  const vw = window.innerWidth || VIRTUAL_WIDTH;
+  const vh = window.innerHeight || VIRTUAL_HEIGHT;
+  // Scale to fit world in viewport at zoom=1
+  return Math.min(vw / VIRTUAL_WIDTH, vh / VIRTUAL_HEIGHT) * camZoom;
 }
 
 function resizeCanvasForViewport(): void {
   if (!canvas) return;
-  const viewportWidth = window.innerWidth || VIRTUAL_WIDTH;
-  const scale = viewportWidth / VIRTUAL_WIDTH;
-  const cssWidth = Math.max(1, Math.floor(VIRTUAL_WIDTH * scale));
-  const cssHeight = Math.max(1, Math.floor(VIRTUAL_HEIGHT * scale));
-  canvas.style.width = `${cssWidth}px`;
-  canvas.style.height = `${cssHeight}px`;
+  const vw = window.innerWidth || VIRTUAL_WIDTH;
+  const vh = window.innerHeight || VIRTUAL_HEIGHT;
+  // Set canvas resolution to viewport size for crisp rendering
+  canvas.width = vw;
+  canvas.height = vh;
+  canvas.style.width = `${vw}px`;
+  canvas.style.height = `${vh}px`;
+  ctx.imageSmoothingEnabled = false;
+}
+
+function clampCamera(): void {
+  const scale = getDisplayScale();
+  const vw = canvas.width;
+  const vh = canvas.height;
+
+  // World dimensions in screen pixels at current zoom
+  const worldW = VIRTUAL_WIDTH * scale;
+  const worldH = VIRTUAL_HEIGHT * scale;
+
+  if (worldW <= vw) {
+    // Center horizontally if world is smaller than viewport
+    camX = (VIRTUAL_WIDTH - vw / scale) / 2;
+  } else {
+    const maxX = VIRTUAL_WIDTH - vw / scale;
+    camX = Math.max(0, Math.min(maxX, camX));
+  }
+
+  if (worldH <= vh) {
+    camY = (VIRTUAL_HEIGHT - vh / scale) / 2;
+  } else {
+    const maxY = VIRTUAL_HEIGHT - vh / scale;
+    camY = Math.max(0, Math.min(maxY, camY));
+  }
+}
+
+function zoomBy(factor: number): void {
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  zoomAt(cx, cy, factor);
+}
+
+function zoomAt(screenX: number, screenY: number, factor: number): void {
+  const scale = getDisplayScale();
+  // World point under cursor before zoom
+  const worldX = camX + screenX / scale;
+  const worldY = camY + screenY / scale;
+
+  camZoom = Math.max(minZoom, Math.min(maxZoom, camZoom * factor));
+
+  // Adjust cam so the world point stays under the cursor
+  const newScale = getDisplayScale();
+  camX = worldX - screenX / newScale;
+  camY = worldY - screenY / newScale;
+  clampCamera();
+}
+
+function fitToScreen(): void {
+  const vw = window.innerWidth || VIRTUAL_WIDTH;
+  const vh = window.innerHeight || VIRTUAL_HEIGHT;
+  camZoom = Math.min(vw / VIRTUAL_WIDTH, vh / VIRTUAL_HEIGHT) / Math.min(vw / VIRTUAL_WIDTH, vh / VIRTUAL_HEIGHT);
+  // Actually just set zoom so world fits in viewport
+  camZoom = Math.min(vw / VIRTUAL_WIDTH, vh / (VIRTUAL_HEIGHT * 0.8));
+  camX = 0;
+  camY = 0;
+  clampCamera();
+}
+
+function resetView(): void {
+  camZoom = 1;
+  camX = 0;
+  camY = 0;
+  fitToScreen();
 }
 
 export function render(characters: Character[]): void {
   latestCharacters = characters;
   advanceEffects();
 
-  ctx.clearRect(0, 0, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+  const vw = canvas.width;
+  const vh = canvas.height;
+  const scale = getDisplayScale();
+
+  // Clear full viewport
+  ctx.fillStyle = "#58a838";
+  ctx.fillRect(0, 0, vw, vh);
+
+  // Apply camera transform
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.translate(-camX, -camY);
+
+  // Draw the world (crop top grass)
   ctx.save();
   ctx.translate(0, -TOP_GRASS_CROP_PX);
   drawScene(ctx, characters, screenAnimIndex, getSeatedBobOffset);
@@ -109,14 +364,18 @@ export function render(characters: Character[]): void {
     sweatAnimFrame,
   );
   ctx.restore();
+
+  // Evening overlay in world space
   drawEveningOverlay(ctx, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+
+  // Menu in world space (so it scales with zoom)
   drawMenu(ctx, VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+
+  ctx.restore();
 }
 
 /**
  * Warm amber overlay for evening hours (18:00–22:00).
- * Fades in over 18:00–18:30 and fades out over 21:30–22:00.
- * Peak opacity ~10% so the scene stays readable.
  */
 function drawEveningOverlay(
   c: CanvasRenderingContext2D,
@@ -185,9 +444,10 @@ function toCanvasPoint(
   clientY: number,
 ): { x: number; y: number } {
   const rect = canvas.getBoundingClientRect();
+  const scale = getDisplayScale();
   return {
-    x: (clientX - rect.left) * (VIRTUAL_WIDTH / rect.width),
-    y: (clientY - rect.top) * (VIRTUAL_HEIGHT / rect.height),
+    x: camX + (clientX - rect.left) / scale,
+    y: camY + (clientY - rect.top) / scale,
   };
 }
 
