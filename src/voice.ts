@@ -175,6 +175,6 @@ export function initVoiceController(
       ttsEnabled = false;
     },
     speak,
-    ttsEnabled: false,
+    get ttsEnabled() { return ttsEnabled; },
   };
 }

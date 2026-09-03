@@ -45,7 +45,7 @@ class Store {
         createdAt: new Date().toISOString(),
       };
       this._save();
-      console.log('[Store] Created default admin user (password: openclaw2026)');
+      console.log('[Store] Created default admin user. Check server/data/office.json for credentials.');
     }
   }
 

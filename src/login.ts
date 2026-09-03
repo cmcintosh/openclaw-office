@@ -21,7 +21,7 @@ export function renderLogin(container: HTMLElement): void {
           <button type="submit" id="login-submit">Enter Office →</button>
           <div id="login-error" class="login-error"></div>
         </form>
-        <p class="login-hint">Default credentials: admin / openclaw2026</p>
+        <p class="login-hint">Use the credentials provided by your administrator</p>
       </div>
     </div>
   `;

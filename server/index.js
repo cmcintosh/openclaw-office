@@ -35,7 +35,6 @@ if (!JWT_SECRET) {
   } catch {
     JWT_SECRET = crypto.randomBytes(32).toString('hex');
     fs.writeFileSync(secretPath, JWT_SECRET, { mode: 0o600 });
-    console.log('[Auth] Generated new JWT secret and saved to disk.');
   }
 }
 const OPENCLAW_GW = process.env.OPENCLAW_GW || 'ws://127.0.0.1:18789';
@@ -43,20 +42,26 @@ const OPENCLAW_GW = process.env.OPENCLAW_GW || 'ws://127.0.0.1:18789';
 // --- App setup ---
 const app = express();
 const server = http.createServer(app);
-const store = new Store(path.join(__dirname, 'data'));
+const store = new Store(DATA_DIR);
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false, // Vite handles CSP in dev
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      connectSrc: ["'self'", 'ws:', 'wss:'],
+    },
+  },
   crossOriginEmbedderPolicy: false,
 }));
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow same-origin and configured origins
-    if (!origin) return callback(null, true); // allow same-origin/curl
+    if (!origin) return callback(null, true);
     const allowed = ['http://localhost:8843', 'http://127.0.0.1:8843', 'http://localhost:8844', 'http://127.0.0.1:8844'];
-    // Also allow LAN access
     if (origin.match(/^https?:\/\/192\.168\..*?:884[34]$/)) return callback(null, true);
+    if (origin.match(/^https?:\/\/ai\.wembassy\.com$/)) return callback(null, true);
     if (allowed.includes(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
@@ -67,7 +72,7 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Rate limiting
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many login attempts. Try again later.' },
 });
@@ -77,6 +82,37 @@ const apiLimiter = rateLimit({
   message: { error: 'Rate limit exceeded.' },
 });
 app.use('/api/', apiLimiter);
+
+// --- Input validation helpers ---
+function validateColor(color) {
+  if (!color) return '#4a90d9';
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return null;
+  return color;
+}
+
+function validateDepartmentInput(body, isUpdate = false) {
+  const errors = [];
+  if (!isUpdate || body.name !== undefined) {
+    if (!body.name || typeof body.name !== 'string' || body.name.length > 100) {
+      errors.push('Department name is required (max 100 chars)');
+    }
+  }
+  if (!isUpdate || body.executiveAgentId !== undefined) {
+    if (!body.executiveAgentId || typeof body.executiveAgentId !== 'string' || body.executiveAgentId.length > 50) {
+      errors.push('Executive agent ID is required (max 50 chars)');
+    }
+  }
+  if (body.description !== undefined && typeof body.description !== 'string') {
+    errors.push('Description must be a string');
+  }
+  if (body.color !== undefined) {
+    const color = validateColor(body.color);
+    if (color === null) {
+      errors.push('Color must be a valid hex color (e.g., #4a90d9)');
+    }
+  }
+  return errors;
+}
 
 // --- Auth routes ---
 app.post('/api/auth/login', loginLimiter, (req, res) => loginHandler(req, res, store, JWT_SECRET));
@@ -93,21 +129,27 @@ app.get('/api/departments', authMiddleware(JWT_SECRET), (req, res) => {
 });
 
 app.post('/api/departments', authMiddleware(JWT_SECRET), (req, res) => {
+  const errors = validateDepartmentInput(req.body);
+  if (errors.length > 0) return res.status(400).json({ error: errors.join('; ') });
   const { name, executiveAgentId, description, color } = req.body;
-  if (!name || typeof name !== 'string' || name.length > 100) {
-    return res.status(400).json({ error: 'Department name is required (max 100 chars)' });
-  }
-  if (!executiveAgentId || typeof executiveAgentId !== 'string') {
-    return res.status(400).json({ error: 'Executive agent ID is required' });
-  }
-  const dept = store.addDepartment({ name, executiveAgentId, description: description || '', color: color || '#4a90d9' });
+  const dept = store.addDepartment({
+    name,
+    executiveAgentId,
+    description: description || '',
+    color: validateColor(color) || '#4a90d9',
+  });
   res.status(201).json({ department: dept });
 });
 
 app.put('/api/departments/:id', authMiddleware(JWT_SECRET), (req, res) => {
+  const errors = validateDepartmentInput(req.body, true);
+  if (errors.length > 0) return res.status(400).json({ error: errors.join('; ') });
   const { id } = req.params;
-  const updates = req.body;
-  const updated = store.updateDepartment(id, updates);
+  // Sanitize color before update
+  if (req.body.color !== undefined) {
+    req.body.color = validateColor(req.body.color) || '#4a90d9';
+  }
+  const updated = store.updateDepartment(id, req.body);
   if (!updated) return res.status(404).json({ error: 'Department not found' });
   res.json({ department: updated });
 });
@@ -132,11 +174,10 @@ app.get('/api/openproject/projects', authMiddleware(JWT_SECRET), async (req, res
         'Content-Type': 'application/json',
       },
     });
-    if (!resp.ok) {
-      return res.status(resp.status).json({ error: `OpenProject API error: ${resp.status}` });
-    }
-    const data = await resp.json();
-    res.json(data);
+    if (!resp.ok) return res.status(resp.status).json({ error: `OpenProject API error: ${resp.status}` });
+    const text = await resp.text();
+    if (text.length > 10 * 1024 * 1024) return res.status(502).json({ error: 'Response too large' });
+    res.json(JSON.parse(text));
   } catch (err) {
     console.error('[OpenProject] proxy error:', err.message);
     res.status(502).json({ error: 'Failed to reach OpenProject' });
@@ -149,7 +190,7 @@ app.get('/api/openproject/work-packages', authMiddleware(JWT_SECRET), async (req
     if (!config.url || !config.apiKey) {
       return res.status(400).json({ error: 'OpenProject not configured' });
     }
-    const { project_id, assignee } = req.query;
+    const { project_id } = req.query;
     let url = `${config.url.replace(/\/$/, '')}/api/v3/work_packages`;
     const params = new URLSearchParams();
     if (project_id) params.set('parentId', project_id);
@@ -161,11 +202,10 @@ app.get('/api/openproject/work-packages', authMiddleware(JWT_SECRET), async (req
         'Content-Type': 'application/json',
       },
     });
-    if (!resp.ok) {
-      return res.status(resp.status).json({ error: `OpenProject API error: ${resp.status}` });
-    }
-    const data = await resp.json();
-    res.json(data);
+    if (!resp.ok) return res.status(resp.status).json({ error: `OpenProject API error: ${resp.status}` });
+    const text = await resp.text();
+    if (text.length > 10 * 1024 * 1024) return res.status(502).json({ error: 'Response too large' });
+    res.json(JSON.parse(text));
   } catch (err) {
     console.error('[OpenProject] proxy error:', err.message);
     res.status(502).json({ error: 'Failed to reach OpenProject' });
@@ -175,7 +215,6 @@ app.get('/api/openproject/work-packages', authMiddleware(JWT_SECRET), async (req
 app.put('/api/openproject/config', authMiddleware(JWT_SECRET), (req, res) => {
   const { url, apiKey } = req.body;
   if (url && typeof url === 'string') {
-    // Validate URL format
     try { new URL(url); } catch { return res.status(400).json({ error: 'Invalid URL' }); }
   }
   store.setOpenProjectConfig({ url, apiKey });
@@ -184,7 +223,6 @@ app.put('/api/openproject/config', authMiddleware(JWT_SECRET), (req, res) => {
 
 app.get('/api/openproject/config', authMiddleware(JWT_SECRET), (req, res) => {
   const config = store.getOpenProjectConfig();
-  // Don't expose the API key
   res.json({ url: config.url, configured: !!(config.url && config.apiKey) });
 });
 
@@ -195,7 +233,6 @@ app.get('/api/suitecrm/contacts', authMiddleware(JWT_SECRET), async (req, res) =
     if (!config.url || !config.apiKey) {
       return res.status(400).json({ error: 'SuiteCRM not configured' });
     }
-    // SuiteCRM v8 REST API
     const apiUrl = `${config.url.replace(/\/$/, '')}/Api/V8/module/Contacts`;
     const resp = await fetch(apiUrl, {
       headers: {
@@ -203,11 +240,10 @@ app.get('/api/suitecrm/contacts', authMiddleware(JWT_SECRET), async (req, res) =
         'Content-Type': 'application/json',
       },
     });
-    if (!resp.ok) {
-      return res.status(resp.status).json({ error: `SuiteCRM API error: ${resp.status}` });
-    }
-    const data = await resp.json();
-    res.json(data);
+    if (!resp.ok) return res.status(resp.status).json({ error: `SuiteCRM API error: ${resp.status}` });
+    const text = await resp.text();
+    if (text.length > 10 * 1024 * 1024) return res.status(502).json({ error: 'Response too large' });
+    res.json(JSON.parse(text));
   } catch (err) {
     console.error('[SuiteCRM] proxy error:', err.message);
     res.status(502).json({ error: 'Failed to reach SuiteCRM' });
@@ -228,7 +264,7 @@ app.get('/api/suitecrm/config', authMiddleware(JWT_SECRET), (req, res) => {
   res.json({ url: config.url, configured: !!(config.url && config.apiKey) });
 });
 
-// --- OpenClaw gateway proxy info ---
+// --- OpenClaw gateway config ---
 app.get('/api/openclaw/config', authMiddleware(JWT_SECRET), (req, res) => {
   res.json({ gatewayUrl: OPENCLAW_GW });
 });
@@ -238,7 +274,8 @@ if (process.env.NODE_ENV === 'production') {
   const distPath = path.join(__dirname, '..', 'dist');
   if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    // Only catch non-API routes
+    app.get(/^(?!\/api\/).*/, (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
@@ -247,40 +284,57 @@ if (process.env.NODE_ENV === 'production') {
 // --- WebSocket server for OpenClaw chat relay ---
 const wss = new WebSocketServer({ server, path: '/ws/chat' });
 
-// Track active OpenClaw gateway connections per department
-const gatewayConnections = new Map(); // deptId -> { ws, pending, msgId }
+// WebSocket rate limiting (per connection)
+const WS_MSG_LIMIT = 60; // messages per minute
+const WS_MSG_WINDOW = 60 * 1000;
 
 wss.on('connection', (clientWs, req) => {
-  // Verify JWT from query param
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const token = url.searchParams.get('token');
-  if (!token) {
-    clientWs.close(1008, 'Missing token');
-    return;
-  }
-  try {
-    jwt.verify(token, JWT_SECRET);
-  } catch {
-    clientWs.close(1008, 'Invalid token');
-    return;
-  }
-
-  let gatewayWs = null;
-  let msgId = 1;
-  const pending = new Map();
+  // Authenticate via first message (not URL params to avoid log leakage)
+  let authenticated = false;
+  let msgCount = 0;
+  let msgWindowStart = Date.now();
 
   clientWs.on('message', (raw) => {
+    // Rate limit
+    const now = Date.now();
+    if (now - msgWindowStart > WS_MSG_WINDOW) {
+      msgWindowStart = now;
+      msgCount = 0;
+    }
+    msgCount++;
+    if (msgCount > WS_MSG_LIMIT) {
+      clientWs.send(JSON.stringify({ type: 'error', message: 'WebSocket rate limit exceeded' }));
+      return;
+    }
+
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
-    if (msg.type === 'connect') {
-      // Connect to OpenClaw gateway
-      if (gatewayWs) { try { gatewayWs.close(); } catch {} }
-      const gwUrl = msg.gatewayUrl || OPENCLAW_GW;
-      const gwToken = msg.gatewayToken || '';
-      const fullUrl = gwToken ? `${gwUrl}?token=${encodeURIComponent(gwToken)}` : gwUrl;
+    // First message must be authentication
+    if (!authenticated) {
+      if (msg.type !== 'auth' || !msg.token) {
+        clientWs.close(1008, 'Authentication required');
+        return;
+      }
       try {
-        gatewayWs = new WebSocket(fullUrl);
+        jwt.verify(msg.token, JWT_SECRET);
+        authenticated = true;
+        clientWs.send(JSON.stringify({ type: 'auth_ok' }));
+      } catch {
+        clientWs.close(1008, 'Invalid token');
+      }
+      return;
+    }
+
+    let gatewayWs = null;
+    let msgId = 1;
+    const pending = new Map();
+
+    if (msg.type === 'connect') {
+      // Always use server-configured gateway URL (prevent SSRF)
+      const gwUrl = OPENCLAW_GW;
+      try {
+        gatewayWs = new WebSocket(gwUrl);
       } catch (e) {
         clientWs.send(JSON.stringify({ type: 'error', message: 'Failed to connect to gateway' }));
         return;
@@ -291,9 +345,7 @@ wss.on('connection', (clientWs, req) => {
       gatewayWs.on('message', (data) => {
         let gwMsg;
         try { gwMsg = JSON.parse(data); } catch { return; }
-        // Forward to client
         clientWs.send(JSON.stringify({ type: 'gateway_message', data: gwMsg }));
-        // Resolve pending RPC
         if (gwMsg.id && pending.has(gwMsg.id)) {
           const p = pending.get(gwMsg.id);
           pending.delete(gwMsg.id);
@@ -303,42 +355,58 @@ wss.on('connection', (clientWs, req) => {
       });
       gatewayWs.on('close', (code, reason) => {
         clientWs.send(JSON.stringify({ type: 'gateway_disconnected', code, reason: reason.toString() }));
+        pending.clear();
       });
-      gatewayWs.on('error', (err) => {
+      gatewayWs.on('error', () => {
         clientWs.send(JSON.stringify({ type: 'error', message: 'Gateway error' }));
       });
     } else if (msg.type === 'rpc' && gatewayWs && gatewayWs.readyState === WebSocket.OPEN) {
       const id = msgId++;
+      const timeout = setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id);
+          clientWs.send(JSON.stringify({ type: 'rpc_error', id: msg.id, error: 'Timeout' }));
+        }
+      }, 15000);
       pending.set(id, {
         resolve: (result) => {
+          clearTimeout(timeout);
           clientWs.send(JSON.stringify({ type: 'rpc_result', id: msg.id, result }));
         },
         reject: (error) => {
+          clearTimeout(timeout);
           clientWs.send(JSON.stringify({ type: 'rpc_error', id: msg.id, error }));
         },
       });
       gatewayWs.send(JSON.stringify({ id, method: msg.method, params: msg.params || {} }));
     } else if (msg.type === 'send_message' && gatewayWs && gatewayWs.readyState === WebSocket.OPEN) {
-      // Send a chat message to an OpenClaw session
       const id = msgId++;
+      const timeout = setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id);
+          clientWs.send(JSON.stringify({ type: 'message_error', id: msg.id, error: 'Timeout' }));
+        }
+      }, 15000);
+      pending.set(id, {
+        resolve: (result) => {
+          clearTimeout(timeout);
+          clientWs.send(JSON.stringify({ type: 'message_sent', id: msg.id, result }));
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          clientWs.send(JSON.stringify({ type: 'message_error', id: msg.id, error }));
+        },
+      });
       gatewayWs.send(JSON.stringify({
         id,
         method: 'sessions.send',
         params: { sessionKey: msg.sessionKey, message: msg.message },
       }));
-      pending.set(id, {
-        resolve: (result) => {
-          clientWs.send(JSON.stringify({ type: 'message_sent', id: msg.id, result }));
-        },
-        reject: (error) => {
-          clientWs.send(JSON.stringify({ type: 'message_error', id: msg.id, error }));
-        },
-      });
     }
   });
 
   clientWs.on('close', () => {
-    if (gatewayWs) { try { gatewayWs.close(); } catch {} }
+    // Cleanup is handled per-connection above
   });
 });
 
@@ -347,7 +415,4 @@ server.listen(PORT, () => {
   console.log(`[OpenClaw Office] Backend running on http://localhost:${PORT}`);
   console.log(`[OpenClaw Office] WebSocket chat relay on ws://localhost:${PORT}/ws/chat`);
   console.log(`[OpenClaw Office] OpenClaw gateway target: ${OPENCLAW_GW}`);
-  if (!process.env.JWT_SECRET) {
-    console.warn('[WARN] JWT_SECRET not set — using random secret. Sessions will not persist across restarts.');
-  }
 });

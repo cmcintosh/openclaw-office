@@ -109,9 +109,15 @@ export const openclaw = {
 
 // --- WebSocket chat relay ---
 export function createChatSocket(): WebSocket {
-  const token = getToken();
-  if (!token) throw new Error('Not authenticated');
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = WS_BASE || `${wsProtocol}//${window.location.host}`;
-  return new WebSocket(`${wsUrl}/ws/chat?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`${wsUrl}/ws/chat`);
+  // Send auth as first message
+  ws.onopen = () => {
+    const token = getToken();
+    if (token) {
+      ws.send(JSON.stringify({ type: 'auth', token }));
+    }
+  };
+  return ws;
 }

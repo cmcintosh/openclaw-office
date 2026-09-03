@@ -31,7 +31,7 @@ export function renderOfficeView(
       <div class="office-header">
         <button id="office-back" class="office-back-btn">← City</button>
         <div class="office-title">
-          <span class="office-dept-dot" style="background: ${department.color}"></span>
+          <span class="office-dept-dot" style="background: ${escapeHtml(department.color)}"></span>
           <span>${department.name}</span>
           ${department.description ? `<span class="office-dept-desc">— ${department.description}</span>` : ''}
         </div>
@@ -138,20 +138,24 @@ function initChat(department: Department): void {
   }
 
   chatWs.onopen = () => {
-    console.log('[Chat] WebSocket connected');
-    updateAgentStatus('connecting');
-
-    // Connect to OpenClaw gateway
-    chatWs!.send(JSON.stringify({
-      type: 'connect',
-      gatewayUrl: localStorage.getItem('oc_gateway_url') || 'ws://127.0.0.1:18789',
-      gatewayToken: localStorage.getItem('oc_gateway_token') || '',
-    }));
+    console.log('[Chat] WebSocket connected, authenticating...');
+    // Auth is sent automatically by createChatSocket on open
   };
 
   chatWs.onmessage = (event) => {
     let msg: any;
     try { msg = JSON.parse(event.data); } catch { return; }
+
+    // Wait for auth confirmation before proceeding
+    if (msg.type === 'auth_ok') {
+      console.log('[Chat] Authenticated, connecting to gateway');
+      updateAgentStatus('connecting');
+      // Connect to gateway — server uses its own configured URL (no SSRF)
+      chatWs!.send(JSON.stringify({
+        type: 'connect',
+      }));
+      return;
+    }
 
     if (msg.type === 'gateway_connected') {
       updateAgentStatus('online');
@@ -191,18 +195,20 @@ function initChat(department: Department): void {
 function handleGatewayMessage(data: any, department: Department): void {
   // Handle RPC responses
   if (data.id === 'list-sessions' && data.result) {
-    // Find the executive agent's main session
+    // Find the executive agent's main session using exact format
     const sessions = data.result.sessions || data.result;
+    const expectedKey = `agent:${department.executiveAgentId}:main`;
     const agentSession = sessions.find((s: any) =>
-      s.key && s.key.includes(department.executiveAgentId) && s.key.includes(':main'),
+      s.key === expectedKey || s.key === `agent:${department.executiveAgentId}`,
     );
     if (agentSession) {
       currentSessionKey = agentSession.key;
       addMessage('system', `Session established with ${department.executiveAgentId}`);
     } else {
-      // Try to find any session for this agent
+      // Try exact match without :main suffix
       const anySession = sessions.find((s: any) =>
-        s.key && s.key.includes(department.executiveAgentId),
+        s.key === `agent:${department.executiveAgentId}` ||
+        s.key?.startsWith(`agent:${department.executiveAgentId}:`),
       );
       if (anySession) {
         currentSessionKey = anySession.key;

@@ -48,11 +48,8 @@ export function renderSettings(container: HTMLElement, onBack: () => void): void
         <section class="settings-section">
           <h2>OpenClaw Gateway</h2>
           <div class="gateway-info">
-            <label>Gateway URL (stored in browser)</label>
-            <input type="text" id="gw-url" placeholder="ws://127.0.0.1:18789" />
-            <label>Gateway Token</label>
-            <input type="password" id="gw-token" placeholder="Gateway auth token" />
-            <button id="gw-save-btn">Save Gateway Settings</button>
+            <p>The gateway URL is configured server-side via the <code>OPENCLAW_GW</code> environment variable.</p>
+            <p class="gateway-url" id="gw-url-display">Loading...</p>
           </div>
         </section>
 
@@ -94,7 +91,7 @@ function renderDeptList(depts: any[]): void {
   }
   list.innerHTML = depts.map((d) => `
     <div class="dept-item">
-      <span class="dept-item-color" style="background: ${d.color}"></span>
+      <span class="dept-item-color" style="background: ${escapeHtml(d.color)}"></span>
       <div class="dept-item-info">
         <strong>${escapeHtml(d.name)}</strong>
         <span class="dept-item-agent">Executive: ${escapeHtml(d.executiveAgentId)}</span>
@@ -132,11 +129,18 @@ async function loadConfigs(): Promise<void> {
     console.error('Failed to load configs:', err);
   }
 
-  // Load gateway settings from localStorage
-  const gwUrl = localStorage.getItem('oc_gateway_url') || '';
-  const gwToken = localStorage.getItem('oc_gateway_token') || '';
-  (document.getElementById('gw-url') as HTMLInputElement).value = gwUrl;
-  (document.getElementById('gw-token') as HTMLInputElement).value = gwToken;
+  // Load gateway URL from server
+  try {
+    const gwConfig = await api.openclaw.getConfig();
+    const gwDisplay = document.getElementById('gw-url-display');
+    if (gwDisplay && gwConfig.gatewayUrl) {
+      gwDisplay.textContent = `Gateway: ${gwConfig.gatewayUrl}`;
+    }
+  } catch {}
+
+  // Remove old gateway localStorage entries
+  localStorage.removeItem('oc_gateway_url');
+  localStorage.removeItem('oc_gateway_token');
 }
 
 function setupHandlers(onBack: () => void): void {
@@ -183,15 +187,6 @@ function setupHandlers(onBack: () => void): void {
     } catch (err: any) {
       document.getElementById('crm-status')!.textContent = '❌ ' + err.message;
     }
-  });
-
-  // Gateway settings
-  document.getElementById('gw-save-btn')!.addEventListener('click', () => {
-    const url = (document.getElementById('gw-url') as HTMLInputElement).value;
-    const token = (document.getElementById('gw-token') as HTMLInputElement).value;
-    localStorage.setItem('oc_gateway_url', url);
-    localStorage.setItem('oc_gateway_token', token);
-    alert('Gateway settings saved.');
   });
 
   // Change password
