@@ -3,3 +3,4 @@ dist/
 .vite/
 *.png
 .DS_Store
+server/data/

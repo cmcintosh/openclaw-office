@@ -1,20 +1,45 @@
-# OpenClaw Office
+# OpenClaw Office v2
 
-A 2D pixel art office visualization for OpenClaw agents. Watch your AI agents work in real time — they walk between desks, interact, and reflect actual session activity from your OpenClaw gateway.
-
-![OpenClaw Office](sprites/characters.png)
+A pixel-art office visualization and chat interface for OpenClaw agents. Features a pixel city with department doors, office rooms with executive agents, text + voice chat, and integrations with OpenProject and SuiteCRM.
 
 ## What It Is
 
-A standalone web app that connects to your OpenClaw Gateway via WebSocket and renders a Kairosoft-style 2D office where each character represents a real agent role:
+A full-stack web app that:
+- **Authenticates users** with JWT-based login
+- **Visualizes departments** as a pixel city with clickable buildings
+- **Provides chat interfaces** to executive agents (text + voice)
+- **Integrates with OpenProject** for task tracking (REST API proxy)
+- **Integrates with SuiteCRM** for contact management (REST API proxy)
+- **Connects to OpenClaw Gateway** via WebSocket for real-time agent communication
 
-- **Boss** (you) — top office area
-- **Assistant** — chief of staff, active when main session is typing
-- **Subagent** — walks around when subagents are running
-- **Cron** — at desk when cron jobs are executing
-- **4 Channel Characters** — Telegram, Discord, Slack, Feishu (configurable)
+## Architecture
 
-Characters walk between desks using A* pathfinding, show speech bubbles with contextual messages, toss paper airplanes, and have clickable menus with session info, reports, and achievements.
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Browser (UI)  │────▶│  Express Backend  │────▶│  OpenClaw GW     │
+│                 │     │                  │     │  (WebSocket)     │
+│  Pixel City     │     │  - JWT Auth      │     └─────────────────┘
+│  Office Rooms   │     │  - Dept CRUD     │
+│  Chat Panel     │     │  - OP Proxy      │
+│  Voice Control  │     │  - CRM Proxy     │
+│                 │     │  - WS Chat Relay  │
+└─────────────────┘     └──────────────────┘
+```
+
+### Backend (`server/`)
+- **Express server** with Helmet security, CORS, and rate limiting
+- **JWT authentication** with scrypt password hashing
+- **Department management** (CRUD, stored in JSON file)
+- **OpenProject proxy** — API keys stored server-side only
+- **SuiteCRM proxy** — API keys stored server-side only
+- **WebSocket relay** — proxies OpenClaw gateway connections with JWT auth
+
+### Frontend (`src/`)
+- **Login view** — JWT-based authentication
+- **City view** — Pixel art city with buildings for each department
+- **Office view** — Pixel art office + chat panel (text + voice)
+- **Settings view** — Department management, API configuration, password change
+- **Voice controller** — Web Speech API for STT, SpeechSynthesis for TTS
 
 ## Quick Start
 
@@ -23,95 +48,85 @@ Characters walk between desks using A* pathfinding, show speech bubbles with con
 git clone https://github.com/cmcintosh/openclaw-office.git
 cd openclaw-office
 
-# Install
+# Install dependencies
 npm install
 
-# Run
+# Start both frontend and backend
 npm run dev
 ```
 
-Opens at `http://localhost:8843`.
+Frontend: `http://localhost:8843`
+Backend: `http://localhost:8844`
 
-On first load, you'll see a config overlay — enter your OpenClaw Gateway URL and token:
-- **URL:** `ws://127.0.0.1:18789` (default for local OpenClaw)
-- **Token:** Your gateway token from `~/.openclaw/openclaw.json`
+### Default Login
+- Username: `admin`
+- Password: `openclaw2026`
+- **⚠️ Change the default password immediately after first login!**
 
-Or pass via URL params: `http://localhost:8843/?gw=ws://127.0.0.1:18789&token=YOUR_TOKEN`
+### Environment Variables
 
-## Remote Access
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8844` | Backend server port |
+| `JWT_SECRET` | Random | JWT signing secret (set for persistent sessions) |
+| `OPENCLAW_GW` | `ws://127.0.0.1:18789` | OpenClaw gateway WebSocket URL |
+| `NODE_ENV` | - | Set to `production` to serve built frontend from backend |
 
-The dev server listens on `0.0.0.0:8843`, so it's accessible from:
-- **Local:** `http://localhost:8843/`
-- **LAN:** `http://<your-ip>:8843/` (e.g., `http://192.168.1.136:8843/`)
-- **Remote:** Via Tailscale, VPN, or SSH tunnel
+## Security Features
 
-For Tailscale access, use your Mac mini's Tailscale IP or hostname:
-```
-http://<mac-mini-tailscale-name>:8843/
-```
+- **JWT-based authentication** — all API endpoints protected
+- **Password hashing** — scrypt + salt, never stored in plaintext
+- **Rate limiting** — 10 login attempts / 15 min, 120 API calls / min
+- **Helmet security headers** — CSP, XSS protection, clickjacking prevention
+- **API key isolation** — third-party keys stored server-side, never exposed to frontend
+- **WebSocket authentication** — JWT verified on WS connection
+- **Input validation** — URL validation, max body size (1MB), field length limits
+- **CORS configuration** — configurable origins
 
-## Auto-Start on Boot
+## Usage
 
-A launchd agent is included:
+### 1. Login
+Navigate to the app and log in with credentials (default: `admin` / `openclaw2026`).
+
+### 2. Configure Departments
+Go to Settings → Departments. Add departments with:
+- **Name** (e.g., "Engineering", "Marketing", "Operations")
+- **Executive Agent ID** (e.g., "cto", "cmo", "coo" — must match OpenClaw agent ID)
+- **Description** (optional)
+- **Color** (for visual identification)
+
+### 3. Configure Integrations
+In Settings:
+- **OpenProject**: Enter your OpenProject URL and API key
+- **SuiteCRM**: Enter your SuiteCRM URL and API key
+- **OpenClaw Gateway**: Enter your gateway URL and token (stored in browser localStorage)
+
+### 4. Use the Pixel City
+- Each department appears as a building in the pixel city
+- Click a building's door to enter that department's office
+- The office view shows the executive agent and a chat panel
+
+### 5. Chat with Agents
+- Type messages in the chat panel
+- Use the 🎤 button for voice input (hold to talk, or click to toggle)
+- Double-click 🎤 to toggle voice responses (text-to-speech)
+- Messages are sent to the agent's OpenClaw session via WebSocket
+
+## Production Deployment
 
 ```bash
-cp ~/Library/LaunchAgents/com.openclaw.office.plist  # already installed
-launchctl load ~/Library/LaunchAgents/com.openclaw.office.plist
+# Build frontend
+npm run build
+
+# Start production server (serves built frontend + API)
+NODE_ENV=production PORT=8844 node server/index.js
 ```
 
-Or use the start script:
+## Browser Support
 
-```bash
-/Volumes/Extreme\ Pro/Documents/openclaw-office/start.sh
-```
-
-## Characters & Activity Mapping
-
-| Character | Role | Active When |
-|-----------|------|-------------|
-| Boss | You | Present if main session active in last 5 min |
-| Assistant | Chief of Staff | Main session typing or recently active |
-| Subagent | Worker | Subagent sessions running (10 min window) |
-| Cron | Worker | Cron jobs executing (5 min window) |
-| Channel 1-4 | Channel Workers | Messages on configured channels (5 min window) |
-
-When active: character sits at desk. When inactive: character walks around the office, visits lounge, tosses paper airplanes.
-
-## Configuration
-
-### Channel Slots
-
-Click any channel character to configure which OpenClaw channel they represent. Supports: Telegram, Discord, Slack, Feishu, WhatsApp, Google Chat, Signal, iMessage, Web Chat.
-
-### Gateway Settings
-
-Stored in `localStorage`. To reset:
-```js
-localStorage.removeItem('oc_gateway_url');
-localStorage.removeItem('oc_gateway_token');
-```
-
-## Architecture
-
-```
-Browser (Canvas 2D)
-  └── WebSocket ──→ OpenClaw Gateway (ws://127.0.0.1:18789)
-       ├── sessions.list    → character activity
-       ├── status           → agent name, memory count
-       ├── channels.status  → channel connection states
-       ├── sessions.usage   → cost/token tracking
-       └── agents.list      → agent metadata
-```
-
-- **15 FPS** fixed timestep game loop
-- **A* pathfinding** on a 15×35 tile grid
-- **Sprite sheets** generated procedurally with @napi-rs/canvas
-- **i18n** — English, German, Spanish, Japanese, Korean, Simplified Chinese
-- **Single-file build** — production build produces one self-contained HTML file
-
-## Origin
-
-Forked from [Clawket](https://github.com/p697/clawket) (office-game module). Converted from React Native WebView + postMessage bridge to standalone web app with direct WebSocket connection to OpenClaw Gateway.
+- **Voice features**: Chrome, Edge, Safari (requires Web Speech API)
+- **Text chat**: All modern browsers
+- **Pixel art rendering**: All modern browsers (Canvas 2D)
 
 ## License
 
