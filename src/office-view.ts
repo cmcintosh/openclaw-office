@@ -45,15 +45,28 @@ export function renderOfficeView(
           <canvas id="office-canvas"></canvas>
         </div>
         <div class="chat-panel" id="chat-panel">
-          <div class="chat-messages" id="chat-messages"></div>
-          <div class="chat-input-row">
-            <button id="voice-btn" class="voice-btn" title="Hold to talk">
-              🎤
-            </button>
-            <input type="text" id="chat-input" placeholder="Message ${department.executiveAgentId}..." autocomplete="off" />
-            <button id="chat-send" class="chat-send-btn">Send</button>
+          <div class="chat-tabs">
+            <button class="chat-tab active" data-tab="chat">💬 Chat</button>
+            <button class="chat-tab" data-tab="tasks">📋 Tasks</button>
+            <button class="chat-tab" data-tab="contacts">👤 Contacts</button>
           </div>
-          <div class="voice-status" id="voice-status"></div>
+          <div class="chat-tab-content" id="tab-chat">
+            <div class="chat-messages" id="chat-messages"></div>
+            <div class="chat-input-row">
+              <button id="voice-btn" class="voice-btn" title="Hold to talk, double-click for voice responses">
+                🎤
+              </button>
+              <input type="text" id="chat-input" placeholder="Message ${department.executiveAgentId}..." autocomplete="off" />
+              <button id="chat-send" class="chat-send-btn">Send</button>
+            </div>
+            <div class="voice-status" id="voice-status"></div>
+          </div>
+          <div class="chat-tab-content hidden" id="tab-tasks">
+            <div class="integration-panel" id="tasks-panel"></div>
+          </div>
+          <div class="chat-tab-content hidden" id="tab-contacts">
+            <div class="integration-panel" id="contacts-panel"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -98,6 +111,21 @@ export function renderOfficeView(
 
   // Initialize the pixel art office canvas
   initOfficeCanvas(department);
+
+  // Tab switching
+  document.querySelectorAll('.chat-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.chat-tab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      const tabId = (tab as HTMLElement).dataset.tab;
+      document.querySelectorAll('.chat-tab-content').forEach((c) => c.classList.add('hidden'));
+      const content = document.getElementById(`tab-${tabId}`);
+      if (content) content.classList.remove('hidden');
+      // Lazy load integration data
+      if (tabId === 'tasks') loadOpenProjectTasks();
+      if (tabId === 'contacts') loadSuiteCRMContacts();
+    });
+  });
 }
 
 function initChat(department: Department): void {
@@ -422,4 +450,72 @@ function cleanup(): void {
   chatMessages = [];
   currentSessionKey = null;
   isWaitingForResponse = false;
+}
+
+// --- Integration panels ---
+
+async function loadOpenProjectTasks(): Promise<void> {
+  const panel = document.getElementById('tasks-panel');
+  if (!panel) return;
+  panel.innerHTML = '<p class="loading">Loading tasks...</p>';
+  try {
+    const api = await import('./api');
+    const result = await api.openproject.getWorkPackages();
+    const workPackages = result._embedded?.elements || result.elements || [];
+    if (workPackages.length === 0) {
+      panel.innerHTML = '<p class="empty-state">No tasks found. Configure OpenProject in Settings.</p>';
+      return;
+    }
+    panel.innerHTML = workPackages.slice(0, 50).map((wp: any) => {
+      const subject = wp.subject || 'Untitled';
+      const type = wp._type || wp.type || 'Task';
+      const status = wp._links?.status?.title || wp.status || 'Unknown';
+      const assignee = wp._links?.assignee?.title || 'Unassigned';
+      const id = wp.id || '';
+      return `
+        <div class="task-item">
+          <div class="task-header">
+            <span class="task-type">${escapeHtml(type)}</span>
+            <span class="task-id">#${id}</span>
+            <span class="task-status">${escapeHtml(status)}</span>
+          </div>
+          <div class="task-subject">${escapeHtml(subject)}</div>
+          <div class="task-assignee">Assigned: ${escapeHtml(assignee)}</div>
+        </div>
+      `;
+    }).join('');
+  } catch (err: any) {
+    panel.innerHTML = `<p class="error-state">⚠ ${escapeHtml(err.message || 'Failed to load tasks')}</p>`;
+  }
+}
+
+async function loadSuiteCRMContacts(): Promise<void> {
+  const panel = document.getElementById('contacts-panel');
+  if (!panel) return;
+  panel.innerHTML = '<p class="loading">Loading contacts...</p>';
+  try {
+    const api = await import('./api');
+    const result = await api.suitecrm.getContacts();
+    const contacts = result.data || result._embedded?.elements || result.elements || [];
+    if (contacts.length === 0) {
+      panel.innerHTML = '<p class="empty-state">No contacts found. Configure SuiteCRM in Settings.</p>';
+      return;
+    }
+    panel.innerHTML = contacts.slice(0, 50).map((c: any) => {
+      const name = c.attributes?.name || c.attributes?.first_name + ' ' + c.attributes?.last_name || c.name || 'Unknown';
+      const email = c.attributes?.email1 || c.attributes?.email || c.email || 'No email';
+      const phone = c.attributes?.phone_work || c.attributes?.phone || c.phone || 'No phone';
+      const title = c.attributes?.title || c.title || '';
+      return `
+        <div class="contact-item">
+          <div class="contact-name">${escapeHtml(name)}</div>
+          ${title ? `<div class="contact-title">${escapeHtml(title)}</div>` : ''}
+          <div class="contact-email">✉ ${escapeHtml(email)}</div>
+          <div class="contact-phone">☎ ${escapeHtml(phone)}</div>
+        </div>
+      `;
+    }).join('');
+  } catch (err: any) {
+    panel.innerHTML = `<p class="error-state">⚠ ${escapeHtml(err.message || 'Failed to load contacts')}</p>`;
+  }
 }

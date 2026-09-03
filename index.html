@@ -388,6 +388,73 @@
     .config-status { font-size: 12px; margin-top: 8px; }
     .empty-state { color: #666; font-size: 12px; text-align: center; padding: 16px; }
     .gateway-info label { font-size: 11px; color: #888; }
+
+    /* Chat Tabs */
+    .chat-tabs {
+      display: flex;
+      border-bottom: 1px solid #333;
+      background: rgba(0,0,0,0.3);
+    }
+    .chat-tab {
+      flex: 1;
+      padding: 10px;
+      background: transparent;
+      border: none;
+      color: #888;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 12px;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .chat-tab:hover { color: #ccc; }
+    .chat-tab.active {
+      color: #0f0;
+      border-bottom-color: #0f0;
+      background: rgba(0,255,0,0.05);
+    }
+    .chat-tab-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .chat-tab-content.hidden { display: none; }
+
+    /* Integration Panels */
+    .integration-panel {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .integration-panel::-webkit-scrollbar { width: 6px; }
+    .integration-panel::-webkit-scrollbar-track { background: #111; }
+    .integration-panel::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    .loading { color: #888; text-align: center; padding: 20px; font-size: 12px; }
+    .error-state { color: #f44; text-align: center; padding: 16px; font-size: 12px; }
+    .task-item {
+      padding: 10px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      border-left: 3px solid #4a90d9;
+    }
+    .task-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .task-type { color: #4a90d9; font-weight: bold; }
+    .task-id { color: #666; }
+    .task-status { color: #4ade80; }
+    .task-subject { font-size: 13px; margin-bottom: 4px; }
+    .task-assignee { font-size: 11px; color: #888; }
+    .contact-item {
+      padding: 10px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      border-left: 3px solid #d94a4a;
+    }
+    .contact-name { font-size: 13px; font-weight: bold; margin-bottom: 2px; }
+    .contact-title { font-size: 11px; color: #888; margin-bottom: 4px; }
+    .contact-email, .contact-phone { font-size: 11px; color: #aaa; margin-top: 2px; }
   </style>
 </head>
 <body>
