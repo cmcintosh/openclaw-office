@@ -23,7 +23,21 @@ const { Store } = require('./store');
 const { authMiddleware, loginHandler, changePasswordHandler } = require('./auth');
 
 const PORT = process.env.PORT || 8844;
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const DATA_DIR = path.join(__dirname, 'data');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// JWT secret: use env var or persist a generated one to disk
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  const secretPath = path.join(DATA_DIR, 'jwt-secret.key');
+  try {
+    JWT_SECRET = fs.readFileSync(secretPath, 'utf8').trim();
+  } catch {
+    JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretPath, JWT_SECRET, { mode: 0o600 });
+    console.log('[Auth] Generated new JWT secret and saved to disk.');
+  }
+}
 const OPENCLAW_GW = process.env.OPENCLAW_GW || 'ws://127.0.0.1:18789';
 
 // --- App setup ---
@@ -36,7 +50,18 @@ app.use(helmet({
   contentSecurityPolicy: false, // Vite handles CSP in dev
   crossOriginEmbedderPolicy: false,
 }));
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow same-origin and configured origins
+    if (!origin) return callback(null, true); // allow same-origin/curl
+    const allowed = ['http://localhost:8843', 'http://127.0.0.1:8843', 'http://localhost:8844', 'http://127.0.0.1:8844'];
+    // Also allow LAN access
+    if (origin.match(/^https?:\/\/192\.168\..*?:884[34]$/)) return callback(null, true);
+    if (allowed.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
